@@ -51,7 +51,7 @@ void py_init(t_py4max* x);
 void py_finalize(void);
 void py4max_import(t_py4max* x, t_symbol* s, int argc, t_atom* argv);
 void py4max_anything(t_py4max* x, t_symbol* s, int argc, t_atom* argv);
-void read_script(t_py4max* x);
+void  run_script(t_py4max* x);
 int set_path(t_symbol* s, t_atom* argv, char** c);
 void py_set_script_path(t_py4max* x);
 
@@ -247,7 +247,7 @@ void py4max_anything(t_py4max* x, t_symbol* s, int argc, t_atom* argv)
 {
     if (x->pModule != NULL) {
         x->pFuncName = PyObject_GetAttrString(x->pModule, s->s_name);
-        read_script(x);
+         run_script(x);
     }
     else
         NO_MODULE(x);
@@ -261,11 +261,9 @@ PyObject* send_vector_to_py(t_py4max* x, t_buffer_obj* buf)
     PyObject *pArgs;
     PyObject *pValue;
     
-    //t_buffer_obj* buffer = buffer_ref_getobject(x->buf_ref);
-    
     float *tab = buffer_locksamples(buf);
     
-    // uso i valori del buffer (se esistono) come argomento di funzione
+    // uses buffer values (if they exists) as function argument
     if (tab) {
         long framecount = buffer_getframecount(buf);
         
@@ -314,7 +312,9 @@ void get_values_from_py(t_py4max* x, t_buffer_obj* buf, PyObject *pValue)
 }
 
 
-void read_script(t_py4max* x)
+// RUN SCRIPT
+
+void  run_script(t_py4max* x)
 {
     PyObject *pValue;
     
