@@ -1,46 +1,68 @@
 #include "ext.h"
-//#include "z_dsp.h"
 #include "ext_buffer.h"
-//#include "ext_atomic.h"
 #include "ext_obex.h"
 #include <Python.h>
+#include <string.h>
+#include <unistd.h>
 
 #define DEBUG   1
 
+char* NO_BUFFER_DATA        = "NO BUFFER DATA";
+char* NO_MODULE_STRING      = "NO MODULE IMPORTED";
+char* NO_PYTHON_STRING      = "PYTHON NOT INITIALIZED";
+char* NO_FUNCTION_STRING    = "FUNCTION NOT FOUND";
+char* CALL_FAILED_STRING    = "FUNCTION CALL FAILED";
+
+#define NO_MODULE(a)    object_warn((t_object *)a, NO_MODULE_STRING, 0);
+#define NO_PYTHON(a)    object_warn((t_object *)a, NO_PYTHON_STRING, 0);
+#define NO_FUNC(a)      object_warn((t_object *)a, NO_FUNCTION_STRING, 0);
+#define CALL_FAILED(a)  object_warn((t_object *)a, CALL_FAILED_STRING, 0);
+
+
 typedef struct _py4max {
-    //t_pxobject      l_obj;
     t_object        l_obj;
     t_buffer_ref*   buf_ref;
     long            n_chan;
     long            framecount;
     long            sr;
     void            *p_outlet;
-    t_symbol*       mModule;
+    
+    // python objects
+    char*           pyPath;
+    char*           scriptPath;
+    PyObject*       pModule;
+    PyObject*       pFuncName;
 } t_py4max;
 
 
 void py4max_set(t_py4max* x, t_symbol* s);
-void* py4max_new(t_symbol* s); //, long chan);
+void* py4max_new(t_symbol* s);
 void py4max_free(t_py4max* x);
 void py4max_bang(t_py4max* x);
 void py4max_dblclick(t_py4max* x);
 void py4max_info(t_py4max* x);
 t_max_err py4max_notify(t_py4max* x, t_symbol* s, t_symbol* msg, void* sender, void* data);
 
+
 // python side
-void py_init(void);
+void py4max_pythonpath(t_py4max* x, t_symbol* s, int argc, t_atom* argv);
+void py4max_scriptpath(t_py4max* x, t_symbol* s, int argc, t_atom* argv);
+void py_init(t_py4max* x);
 void py_finalize(void);
 void py4max_import(t_py4max* x, t_symbol* s, int argc, t_atom* argv);
 void py4max_anything(t_py4max* x, t_symbol* s, int argc, t_atom* argv);
-float read_script(t_py4max* x, t_symbol* funcname, int argc, t_atom* argv);
+void read_script(t_py4max* x);
+int set_path(t_symbol* s, t_atom* argv, char** c);
+void py_set_script_path(t_py4max* x);
+
 
 static t_class* py4max_class;
+
 
 void ext_main(void* r)
 {
     t_class* c = class_new("py4max", (method)py4max_new, (method)py4max_free, sizeof(t_py4max), NULL, A_SYM, 0);
 
-    //class_addmethod(c, (method)py4max_dsp64, "dsp64", A_CANT, 0);
     class_addmethod(c, (method)py4max_set, "set", A_SYM, 0);
     class_addmethod(c, (method)py4max_bang, "bang", A_CANT, 0);
     class_addmethod(c, (method)py4max_dblclick, "dblclick", A_CANT, 0);
@@ -48,6 +70,8 @@ void ext_main(void* r)
     class_addmethod(c, (method)py4max_notify, "notify", A_CANT, 0);
     class_addmethod(c, (method)py4max_import, "import", A_GIMME, 0);
     class_addmethod(c, (method)py4max_anything, "anything", A_GIMME, 0);
+    class_addmethod(c, (method)py4max_pythonpath, "pythonpath", A_GIMME, 0);
+    class_addmethod(c, (method)py4max_scriptpath, "scriptpath", A_GIMME, 0);
     //class_dspinit(c);
     class_register(CLASS_BOX, c);
     py4max_class = c;
@@ -56,12 +80,7 @@ void ext_main(void* r)
 
 void py4max_bang(t_py4max* x)
 {
-    t_buffer_obj* buffer = buffer_ref_getobject(x->buf_ref);
-    
-    float *tab = buffer_locksamples(buffer);
-    for (int i=0; i<100; i++)
-        outlet_float(x->p_outlet, *tab++);
-    buffer_unlocksamples(buffer);
+    py_init(x);
 }
 
 
@@ -89,8 +108,6 @@ void py4max_dblclick(t_py4max* x)
 void* py4max_new(t_symbol* s)
 {
     t_py4max* x = object_alloc(py4max_class);
-    //dsp_setup((t_pxobject *)x, 1);
-    py_init();
     py4max_set(x, s);
     x->p_outlet = intout(x);
     return (x);
@@ -99,14 +116,16 @@ void* py4max_new(t_symbol* s)
 
 void py4max_free(t_py4max* x)
 {
+    if (x->pModule != NULL) Py_DECREF(x->pModule);
     py_finalize();
-    //dsp_free((t_pxobject*)x);
     object_free(x->buf_ref);
 }
 
 
 t_max_err py4max_notify(t_py4max* x, t_symbol* s, t_symbol* msg, void* sender, void* data)
 {
+    poststring(s->s_name);
+    poststring(msg->s_name);
     return buffer_ref_notify(x->buf_ref, s, msg, sender, data);
 }
 
@@ -117,18 +136,74 @@ t_max_err py4max_notify(t_py4max* x, t_symbol* s, t_symbol* msg, void* sender, v
 *****************************************/
 
 
-void py_init() {
-    const wchar_t* home = Py_DecodeLocale("/Library/Frameworks/Python.framework/Versions/3.7", NULL);
-    Py_SetPythonHome(home);
+void py4max_pythonpath(t_py4max* x, t_symbol* s, int argc, t_atom* argv)
+{
+    set_path(s, argv, &x->pyPath);
+    //t_symbol *p;
+    //path_absolutepath(&p, gensym("."),NULL, 0);
+#if DEBUG
+    poststring("python path:");
+    poststring(x->pyPath);
+#endif
+}
+
+
+void py4max_scriptpath(t_py4max* x, t_symbol* s, int argc, t_atom* argv)
+{
+    set_path(s, argv, &x->scriptPath);
+#if DEBUG
+    poststring("script search path:");
+    poststring(x->scriptPath);
+#endif
+}
+
+
+int set_path(t_symbol* s, t_atom* argv, char** c)
+{
+    t_symbol *path = atom_getsym(&argv[0]);
+    *c = path->s_name;
+    return 0;
+}
+
+
+void py_set_script_path(t_py4max* x) {
+    PyObject *pList;
+    PyObject* pSys = PyUnicode_DecodeFSDefault("sys");
+    PyObject* pSysModule = PyImport_Import(pSys);
+    pList = PyObject_GetAttrString(pSysModule, (const char*)"path");
+    
+    if (PyList_Check(pList)){
+        PyList_Append(pList, PyUnicode_DecodeFSDefault(x->scriptPath));
+    }
+    
+#if DEBUG
+    for (int i=0; i<PyList_Size(pList); i++) {
+        PyObject *value = PyList_GetItem(pList, i);
+        poststring(Py_EncodeLocale(PyUnicode_AsWideCharString(value, NULL), NULL));
+    }
+#endif
+    
+    Py_DECREF(pList);
+    Py_DECREF(pSysModule);
+    Py_DECREF(pSys);
+}
+
+
+void py_init(t_py4max* x) {
+    
+    if (x->pyPath) {
+        const wchar_t* home = Py_DecodeLocale(x->pyPath, NULL);
+        Py_SetPythonHome(home);
+    }
+    
     Py_Initialize();
-    PyRun_SimpleString("import sys");
-    PyRun_SimpleString("sys.path.append(\"/Users/neum/Documents/py4max\")");
+    py_set_script_path(x);
+    
+#if DEBUG
     PyRun_SimpleString("print('python version is:', sys.version)");
     PyRun_SimpleString("print(sys.prefix)");
     PyRun_SimpleString("print(sys.path)");
-    
     wchar_t* pg_name = Py_GetProgramName();
-    
     post("PROGRAMNAME: %ls", pg_name);
     post("EXECPREFIX: %ls", Py_GetExecPrefix());
     post("PROGRAM FULLPATH: %ls", Py_GetProgramFullPath());
@@ -137,6 +212,7 @@ void py_init() {
     post("GETPATH: %ls", Py_GetPath());
     post("GETVERSION: %s", Py_GetVersion());
     post("is initialized: %d", Py_IsInitialized());
+#endif
 }
 
 
@@ -147,105 +223,118 @@ void py_finalize() {
 
 void py4max_import(t_py4max* x, t_symbol* s, int argc, t_atom* argv)
 {
-    t_symbol* module = atom_getsym(&argv[0]);
-    post("module name: %s", module->s_name);
-    x->mModule = module;
+    if (Py_IsInitialized()) {
+        t_symbol* module = atom_getsym(&argv[0]);
+    
+#if DEBUG
+        post("module name: %s", module->s_name);
+#endif
+    
+        PyObject* pName = PyUnicode_DecodeFSDefault(module->s_name);
+        Py_XDECREF(x->pModule);
+    
+        x->pModule = PyImport_Import(pName);
+        Py_DECREF(pName);
+    
+        if (!x->pModule)
+            NO_MODULE(x);
+    } else
+        NO_PYTHON(x);
 }
 
 
 void py4max_anything(t_py4max* x, t_symbol* s, int argc, t_atom* argv)
 {
-    post("funcname: %s", s->s_name);
-    //postatom(argc, argv);
-    float arg = atom_getfloat(&argv[0]);
-    post("\n");
-    
-    read_script(x, s, argc, argv);
+    if (x->pModule != NULL) {
+        x->pFuncName = PyObject_GetAttrString(x->pModule, s->s_name);
+        read_script(x);
+    }
+    else
+        NO_MODULE(x);
 }
 
 
-float read_script(t_py4max* x, t_symbol* funcname, int argc, t_atom* argv)
+
+PyObject* send_vector_to_py(t_py4max* x, t_buffer_obj* buf)
 {
-    PyObject *pName, *pModule, *pFunc, *pList;
-    PyObject *pArgs, *pValue;
+    PyObject *pList;
+    PyObject *pArgs;
+    PyObject *pValue;
     
-    //float result;
+    //t_buffer_obj* buffer = buffer_ref_getobject(x->buf_ref);
     
-    if (x->mModule != NULL) {
-        pName = PyUnicode_DecodeFSDefault(x->mModule->s_name);
-        pModule = PyImport_Import(pName);
-    } else {
-        post("No module imported, import a module with import statement");
-        return -1;
-    }
+    float *tab = buffer_locksamples(buf);
     
-    Py_DECREF(pName);
-    
-    if (pModule != NULL) {
-        pFunc = PyObject_GetAttrString(pModule, funcname->s_name);
-        /* pFunc is a new reference */
+    // uso i valori del buffer (se esistono) come argomento di funzione
+    if (tab) {
+        long framecount = buffer_getframecount(buf);
         
-        if (pFunc && PyCallable_Check(pFunc)) {
-            
-            if (argc) {
-                pList = PyList_New(argc);
-                pArgs = PyTuple_New(1);
-                
-                for (int i = 0; i < argc; i++) {
-                    post("%d", (t_int)atom_getfloat(&argv[i]));
-                    PyList_SetItem(pList, i, PyLong_FromLong((t_int)atom_getfloat(&argv[i])));
-                }
-                
-                post("lunghezza lista: %d", PyList_Size(pList));
-                
-                PyTuple_SetItem(pArgs, 0, pList);
-                pValue = PyObject_CallObject(pFunc, pArgs);
-                Py_DECREF(pArgs);
-            } else {
-                pArgs = NULL;
-                pValue = PyObject_CallObject(pFunc, pArgs);
-            }
-            
-            if (pValue != NULL) {
-                
-                int size = (int)PyList_Size(pValue);
-                
-                //outlet_float(x->x_obj.ob_outlet, read_script(x, funcname, arg));
-                //outlet_list(x->x_obj.ob_outlet, &s_list, size);
-                
-                t_atom tastoma[size];
-                
-                //SETFLOAT(&x->result[i], x->l_list[i].a_w.w_float / x->r_list[i].a_w.w_float);
-                
-                for (int i = 0; i < size; i++) {
-                    float item = PyFloat_AsDouble(PyList_GetItem(pValue, i));
-                    atom_setfloat(&tastoma[i], item);
-                }
-                
-                //t_atom *tastoma;
-                
-                Py_DECREF(pValue);
-                outlet_list(x->p_outlet, gensym("list"), size, tastoma);
-            } else {
-                Py_DECREF(pFunc);
-                Py_DECREF(pModule);
-                PyErr_Print();
-                //post(pValue);
-                post("Call failed");
-                return 1.0;
-            }
+        // create empty list ([] in python)
+        pList = PyList_New(0);
+        pArgs = PyTuple_New(1);
+        
+        // append values to list
+        while (framecount--) {
+            PyList_Append(pList, PyFloat_FromDouble(*tab++));
+        }
+        
+        PyTuple_SetItem(pArgs, 0, pList);
+        pValue = PyObject_CallObject(x->pFuncName, pArgs);
+        
+        buffer_unlocksamples(buf);
+        Py_DECREF(pArgs);
+        return pValue;
+    } else {
+        poststring(NO_BUFFER_DATA);
+        return NULL;
+    }
+}
+
+
+void get_values_from_py(t_py4max* x, t_buffer_obj* buf, PyObject *pValue)
+{
+    if (pValue != NULL) {
+        //post("value is NOT NULL");
+        int size = (int)PyList_Size(pValue);
+        
+        float *tab = buffer_locksamples(buf);
+        
+        for (int i = 0; i < size; i++) {
+            *tab++ = PyFloat_AsDouble(PyList_GetItem(pValue, i));
+        }
+        
+        buffer_unlocksamples(buf);
+        Py_DECREF(pValue);
+    } else {
+        Py_DECREF(x->pFuncName);
+        Py_DECREF(x->pModule);
+        PyErr_Print();
+        CALL_FAILED(x);
+    }
+}
+
+
+void read_script(t_py4max* x)
+{
+    PyObject *pValue;
+    
+    if (x->pModule != NULL) {
+        
+        if (x->pFuncName && PyCallable_Check(x->pFuncName)) {
+            t_buffer_obj* buffer = buffer_ref_getobject(x->buf_ref);
+            pValue = send_vector_to_py(x, buffer);
+            get_values_from_py(x, buffer, pValue);
         } else {
+#if DEBUG
             if (PyErr_Occurred())
                 PyErr_Print();
-            post("Cannot find function");
+#endif
+            NO_FUNC(x);
         }
-        Py_XDECREF(pFunc);
-        Py_DECREF(pModule);
+        
+        Py_XDECREF(x->pFuncName);
     } else {
         PyErr_Print();
-        post("Failed to load module");
-        return 1.0;
+        NO_MODULE(x);
     }
-    
-    return 0;
 }

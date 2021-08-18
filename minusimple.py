@@ -15,4 +15,4 @@ def random_matrix(n):
 
 
 def add_list(lst):
-    return (np.array(lst) * 0.5).tolist()
+    return (np.array(lst) * 0.1).tolist()
