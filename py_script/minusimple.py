@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 import random
 
 
@@ -15,4 +16,5 @@ def random_matrix(n):
 
 
 def add_list(lst):
+    print("PANDAS VERSION", pd.__version__)
     return (np.array(lst) * 0.1).tolist()

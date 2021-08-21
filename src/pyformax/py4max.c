@@ -17,6 +17,7 @@ char* CALL_FAILED_STRING    = "FUNCTION CALL FAILED";
 #define NO_PYTHON(a)    object_warn((t_object *)a, NO_PYTHON_STRING, 0);
 #define NO_FUNC(a)      object_warn((t_object *)a, NO_FUNCTION_STRING, 0);
 #define CALL_FAILED(a)  object_warn((t_object *)a, CALL_FAILED_STRING, 0);
+#define WARNING(a,b,c)  object_warn((t_object *)a, b, c);
 
 
 typedef struct _py4max {
@@ -52,7 +53,6 @@ void py_finalize(void);
 void py4max_import(t_py4max* x, t_symbol* s, int argc, t_atom* argv);
 void py4max_anything(t_py4max* x, t_symbol* s, int argc, t_atom* argv);
 void  run_script(t_py4max* x);
-int set_path(t_symbol* s, t_atom* argv, char** c);
 void py_set_script_path(t_py4max* x);
 
 
@@ -138,80 +138,91 @@ t_max_err py4max_notify(t_py4max* x, t_symbol* s, t_symbol* msg, void* sender, v
 
 void py4max_pythonpath(t_py4max* x, t_symbol* s, int argc, t_atom* argv)
 {
-    set_path(s, argv, &x->pyPath);
-    //t_symbol *p;
-    //path_absolutepath(&p, gensym("."),NULL, 0);
+    t_symbol *pa;
+    char dst[1024];
+    path_absolutepath(&pa, gensym("."), NULL, 0);
+    path_nameconform(pa->s_name, dst, 0, 3);
+    pa = gensym(dst);
+    
+    if (argc) pa = atom_getsym(&argv[0]);
+    x->pyPath = pa->s_name;
+    
 #if DEBUG
-    poststring("python path:");
-    poststring(x->pyPath);
+    post_sym(x, gensym("PYTHON_PATH:"));
+    post_sym(x, gensym(x->pyPath));
 #endif
 }
 
 
 void py4max_scriptpath(t_py4max* x, t_symbol* s, int argc, t_atom* argv)
 {
-    set_path(s, argv, &x->scriptPath);
+    t_symbol* pa = atom_getsym(&argv[0]);
+    x->scriptPath = pa->s_name;
+    py_set_script_path(x);
+    
 #if DEBUG
-    poststring("script search path:");
-    poststring(x->scriptPath);
+    post_sym(x, gensym("SCRIPT_SEARCH_PATH:"));
+    post_sym(x, gensym(x->scriptPath));
 #endif
-}
-
-
-int set_path(t_symbol* s, t_atom* argv, char** c)
-{
-    t_symbol *path = atom_getsym(&argv[0]);
-    *c = path->s_name;
-    return 0;
 }
 
 
 void py_set_script_path(t_py4max* x) {
-    PyObject *pList;
-    PyObject* pSys = PyUnicode_DecodeFSDefault("sys");
-    PyObject* pSysModule = PyImport_Import(pSys);
-    pList = PyObject_GetAttrString(pSysModule, (const char*)"path");
-    
-    if (PyList_Check(pList)){
-        PyList_Append(pList, PyUnicode_DecodeFSDefault(x->scriptPath));
-    }
-    
+    if (x->scriptPath && Py_IsInitialized()) {
+        PyObject *pList;
+        //PyObject* pSys = PyUnicode_DecodeFSDefault("sys");
+        //PyObject* pSysModule = PyImport_Import(pSys);
+        PyObject* pSysModule = PyImport_ImportModule("sys");
+        pList = PyObject_GetAttrString(pSysModule, (const char*)"path");
+        
+        if (PyList_Check(pList)){
+            PyList_Append(pList, PyUnicode_DecodeFSDefault(x->scriptPath));
+        }
+        
 #if DEBUG
-    for (int i=0; i<PyList_Size(pList); i++) {
-        PyObject *value = PyList_GetItem(pList, i);
-        poststring(Py_EncodeLocale(PyUnicode_AsWideCharString(value, NULL), NULL));
-    }
+        for (int i=0; i<PyList_Size(pList); i++) {
+            PyObject *value = PyList_GetItem(pList, i);
+            //poststring(Py_EncodeLocale(PyUnicode_AsWideCharString(value, NULL), NULL));
+            post_sym(x, gensym(Py_EncodeLocale(PyUnicode_AsWideCharString(value, NULL), NULL)));
+        }
 #endif
-    
-    Py_DECREF(pList);
-    Py_DECREF(pSysModule);
-    Py_DECREF(pSys);
+        
+        Py_DECREF(pList);
+        Py_DECREF(pSysModule);
+        //Py_DECREF(pSys);
+    }
 }
 
 
 void py_init(t_py4max* x) {
+    
+    if (Py_IsInitialized()) Py_FinalizeEx();
     
     if (x->pyPath) {
         const wchar_t* home = Py_DecodeLocale(x->pyPath, NULL);
         Py_SetPythonHome(home);
     }
     
-    Py_Initialize();
+    const wchar_t* pgname = Py_DecodeLocale("/Users/neum/Documents/py4max/venvtest/bin/python3.9", NULL);
+    Py_SetProgramName(pgname);
+
+    Py_InitializeEx(0);
     py_set_script_path(x);
     
 #if DEBUG
+    PyRun_SimpleString("import sys");
     PyRun_SimpleString("print('python version is:', sys.version)");
     PyRun_SimpleString("print(sys.prefix)");
     PyRun_SimpleString("print(sys.path)");
     wchar_t* pg_name = Py_GetProgramName();
-    post("PROGRAMNAME: %ls", pg_name);
-    post("EXECPREFIX: %ls", Py_GetExecPrefix());
-    post("PROGRAM FULLPATH: %ls", Py_GetProgramFullPath());
-    post("PLATFORM: %s", Py_GetPlatform());
-    post("PYTHONHOME: %ls", Py_GetPythonHome());
-    post("GETPATH: %ls", Py_GetPath());
-    post("GETVERSION: %s", Py_GetVersion());
-    post("is initialized: %d", Py_IsInitialized());
+    WARNING(x, "PROGRAM_NAME: %ls", pg_name);
+    WARNING(x, "EXECPREFIX: %ls", Py_GetExecPrefix());
+    WARNING(x, "PROGRAM FULLPATH: %ls", Py_GetProgramFullPath());
+    WARNING(x, "PLATFORM: %s", Py_GetPlatform());
+    WARNING(x, "PYTHONHOME: %ls", Py_GetPythonHome());
+    WARNING(x, "GETPATH: %ls", Py_GetPath());
+    WARNING(x, "GETVERSION: %s", Py_GetVersion());
+    WARNING(x, "is initialized: %d", Py_IsInitialized());
 #endif
 }
 
@@ -223,23 +234,27 @@ void py_finalize() {
 
 void py4max_import(t_py4max* x, t_symbol* s, int argc, t_atom* argv)
 {
-    if (Py_IsInitialized()) {
-        t_symbol* module = atom_getsym(&argv[0]);
+    if (!Py_IsInitialized()) py_init(x);
+    
+    t_symbol* module = atom_getsym(&argv[0]);
     
 #if DEBUG
-        post("module name: %s", module->s_name);
+    post("module name: %s", module->s_name);
 #endif
+
+    PyObject* pName = PyUnicode_DecodeFSDefault(module->s_name);
+    Py_XDECREF(x->pModule);
+
+    x->pModule = PyImport_Import(pName);
+    //x->pModule = PyImport_ImportModule(module->s_name);
+    Py_DECREF(pName);
     
-        PyObject* pName = PyUnicode_DecodeFSDefault(module->s_name);
-        Py_XDECREF(x->pModule);
-    
-        x->pModule = PyImport_Import(pName);
-        Py_DECREF(pName);
-    
-        if (!x->pModule)
-            NO_MODULE(x);
-    } else
-        NO_PYTHON(x);
+
+    if (!x->pModule) {
+        PyRun_SimpleString("print('MODULES: ')");
+        PyRun_SimpleString("print(sys.modules)");
+        NO_MODULE(x);
+    }
 }
 
 

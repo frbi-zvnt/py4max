@@ -1,5 +1,2 @@
-import random
-
-
-def callist():
-    return [24, 26, 28.6]
+def callist(lst):
+    return list(map(lambda x: x*0.1, lst))
