@@ -4,6 +4,9 @@
 #include <Python.h>
 #include <string.h>
 #include <unistd.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdarg.h>
 
 #define DEBUG   1
 
@@ -31,6 +34,10 @@ typedef struct _py4max {
     // python objects
     char*           pyPath;
     char*           scriptPath;
+    char*           envPath;
+    char*           home;
+    char*           py_executable;
+    char*           py_path;
     PyObject*       pModule;
     PyObject*       pFuncName;
 } t_py4max;
@@ -48,12 +55,20 @@ t_max_err py4max_notify(t_py4max* x, t_symbol* s, t_symbol* msg, void* sender, v
 // python side
 void py4max_pythonpath(t_py4max* x, t_symbol* s, int argc, t_atom* argv);
 void py4max_scriptpath(t_py4max* x, t_symbol* s, int argc, t_atom* argv);
+void py4max_envpath(t_py4max* x, t_symbol* s, int argc, t_atom* argv);
 void py_init(t_py4max* x);
 void py_finalize(void);
 void py4max_import(t_py4max* x, t_symbol* s, int argc, t_atom* argv);
 void py4max_anything(t_py4max* x, t_symbol* s, int argc, t_atom* argv);
-void  run_script(t_py4max* x);
+void run_script(t_py4max* x);
 void py_set_script_path(t_py4max* x);
+void py_set_env_path(t_py4max* x);
+void get_pyvenv_path(t_py4max* x);
+char *remove_white_spaces(char *str);
+char *get_py_executable (char *str);
+void get_py_path(t_py4max* x);
+char* replace_char(char* str, char find, char replace);
+char* mstrcat(int n, ...);
 
 
 static t_class* py4max_class;
@@ -72,6 +87,7 @@ void ext_main(void* r)
     class_addmethod(c, (method)py4max_anything, "anything", A_GIMME, 0);
     class_addmethod(c, (method)py4max_pythonpath, "pythonpath", A_GIMME, 0);
     class_addmethod(c, (method)py4max_scriptpath, "scriptpath", A_GIMME, 0);
+    class_addmethod(c, (method)py4max_envpath, "envpath", A_GIMME, 0);
     //class_dspinit(c);
     class_register(CLASS_BOX, c);
     py4max_class = c;
@@ -80,7 +96,8 @@ void ext_main(void* r)
 
 void py4max_bang(t_py4max* x)
 {
-    py_init(x);
+    get_pyvenv_path(x);
+    //py_init(x);
 }
 
 
@@ -167,6 +184,19 @@ void py4max_scriptpath(t_py4max* x, t_symbol* s, int argc, t_atom* argv)
 }
 
 
+void py4max_envpath(t_py4max* x, t_symbol* s, int argc, t_atom* argv)
+{
+    t_symbol* pa = atom_getsym(&argv[0]);
+    x->envPath = pa->s_name;
+    py_set_env_path(x);
+    
+#if DEBUG
+    post_sym(x, gensym("ENV_PATH:"));
+    post_sym(x, gensym(x->envPath));
+#endif
+}
+
+
 void py_set_script_path(t_py4max* x) {
     if (x->scriptPath && Py_IsInitialized()) {
         PyObject *pList;
@@ -194,6 +224,31 @@ void py_set_script_path(t_py4max* x) {
 }
 
 
+void py_set_env_path(t_py4max* x) {
+    if (x->envPath && Py_IsInitialized()) {
+    //if (Py_IsInitialized()) {
+        PyObject *pList;
+        PyObject* pSysModule = PyImport_ImportModule("sys");
+        pList = PyObject_GetAttrString(pSysModule, (const char*)"path");
+        
+        if (PyList_Check(pList)){
+            //PyList_Append(pList, PyUnicode_DecodeFSDefault("/Users/neum/Documents/py4max/venv38/lib/python3.8/site-packages"));
+            PyList_SetItem(pList, 3, PyUnicode_DecodeFSDefault("/Users/neum/Documents/py4max/venv38/lib/python3.8/site-packages"));
+        }
+        
+#if DEBUG
+        for (int i=0; i<PyList_Size(pList); i++) {
+            PyObject *value = PyList_GetItem(pList, i);
+            post_sym(x, gensym(Py_EncodeLocale(PyUnicode_AsWideCharString(value, NULL), NULL)));
+        }
+#endif
+        
+        Py_DECREF(pList);
+        Py_DECREF(pSysModule);
+    }
+}
+
+
 void py_init(t_py4max* x) {
     
     if (Py_IsInitialized()) Py_FinalizeEx();
@@ -203,11 +258,22 @@ void py_init(t_py4max* x) {
         Py_SetPythonHome(home);
     }
     
-    const wchar_t* pgname = Py_DecodeLocale("/Users/neum/Documents/py4max/venvtest/bin/python3.9", NULL);
-    Py_SetProgramName(pgname);
+    //system("source /Users/neum/Documents/py4max/virtual38/bin/activate");
+    
+    //Py_SetPythonHome(Py_DecodeLocale("/Users/neum/Documents/py4max/virtual38/bin", NULL));
+    
+    //Py_SetPath(Py_DecodeLocale("/Library/Frameworks/Python.framework/Versions/3.8/lib/python38.zip:/Library/Frameworks/Python.framework/Versions/3.8/lib/python3.8:/Library/Frameworks/Python.framework/Versions/3.8/lib/python3.8/lib-dynload:/Users/neum/Documents/py4max/venv38/lib/python3.8/site-packages", NULL));
+    
 
+    //Py_SetPath(Py_DecodeLocale("/Library/Frameworks/Python.framework/Versions/3.8/lib/python38.zip:/Library/Frameworks/Python.framework/Versions/3.8/lib/python3.8:/Library/Frameworks/Python.framework/Versions/3.8/lib/python3.8/lib-dynload:/Users/neum/Documents/py4max/virtual38/lib/python3.8/site-packages", NULL));
+    
+    Py_SetPath(Py_DecodeLocale(x->py_path, NULL));
+    
     Py_InitializeEx(0);
     py_set_script_path(x);
+    //py_set_env_path(x);
+    
+    
     
 #if DEBUG
     PyRun_SimpleString("import sys");
@@ -216,8 +282,9 @@ void py_init(t_py4max* x) {
     PyRun_SimpleString("print(sys.path)");
     wchar_t* pg_name = Py_GetProgramName();
     WARNING(x, "PROGRAM_NAME: %ls", pg_name);
+    WARNING(x, "PREFIX: %ls", Py_GetPrefix());
     WARNING(x, "EXECPREFIX: %ls", Py_GetExecPrefix());
-    WARNING(x, "PROGRAM FULLPATH: %ls", Py_GetProgramFullPath());
+    WARNING(x, "PROGRAM FULLPATH: %ls", Py_GetProgramFullPath()); // Max path
     WARNING(x, "PLATFORM: %s", Py_GetPlatform());
     WARNING(x, "PYTHONHOME: %ls", Py_GetPythonHome());
     WARNING(x, "GETPATH: %ls", Py_GetPath());
@@ -352,4 +419,163 @@ void  run_script(t_py4max* x)
         PyErr_Print();
         NO_MODULE(x);
     }
+}
+
+
+// READ CONFIG PYVENV FILE
+
+void get_pyvenv_path(t_py4max* x) {
+    char* p = "/Users/neum/Documents/py4max/virtual38/pyvenv.cfg";
+    FILE *fptr;
+    
+    char buf[1024];
+    char delim[] = "=";
+    char home[128];
+    
+    fptr = fopen(p, "r");
+    
+    while (fgets(buf, 255, (FILE*)fptr) != NULL) {
+        //poststring(buf);
+        char *ptr = strtok(buf, delim);
+        
+        while (ptr != NULL) {
+            if (strcmp(remove_white_spaces(ptr), "home") == 0) {
+                ptr = strtok(NULL, delim);
+                strcpy(home, remove_white_spaces(ptr));
+                home[strlen(home) - 1] = '\0';
+                x->home = home;
+            }
+            
+            if (strcmp(remove_white_spaces(ptr), "base-executable") == 0) {
+                ptr = strtok(NULL, delim);
+                x->py_executable = remove_white_spaces(get_py_executable(ptr));
+            }
+            
+            ptr = strtok(NULL, delim);
+        }
+    }
+    
+    fclose(fptr);
+    
+    get_py_path(x);
+}
+
+
+char *remove_white_spaces(char *str) {
+    int i = 0, j = 0;
+    while (str[i])
+    {
+        if (str[i] != ' ')
+            str[j++] = str[i];
+        i++;
+    }
+    str[j] = '\0';
+    return str;
+}
+
+
+char* get_py_executable (char *str) {
+    char delim[] = "/";
+    char cp[512];
+    char *token;
+    char *rest = cp;
+    char executable[128];
+    char *exec = executable;
+
+    strcpy(cp, str);
+    
+    while ((token = strtok_r(rest, delim, &rest)))
+        if (token != NULL) strcpy(executable, token);
+    
+    return exec;
+}
+
+
+void get_py_path(t_py4max* x) {
+    char* p1 = "/lib/";
+    char* p2 = "/lib-dynload";
+    char* p3 = "/site-packages";
+    char* p4 = "/Users/neum/Documents/py4max/virtual38";
+    
+    char* homeglobal = mstrcat(3, x->home, p1, x->py_executable);
+    char* dyn = mstrcat(4, x->home, p1, x->py_executable, p2);
+    char* packages = mstrcat(4, p4, p1, x->py_executable, p3);
+    //char* zip = mstrcat(4, x->home, p1, remove_white_spaces(replace_char(x->py_executable, '.', ' ')), ".zip");
+    
+    poststring(homeglobal);
+    poststring(dyn);
+    //poststring(zip);
+    poststring(packages);
+    
+    /*
+    char homeglobal[512];
+    char dyn[512];
+    char packages[512];
+    char zip[512];
+    
+    char whole_path[4096];
+    
+    strcpy(homeglobal, x->home);
+    strcat(homeglobal, p1);
+    strcat(homeglobal, x->py_executable);
+    
+    poststring(homeglobal);
+    
+    strcpy(dyn, homeglobal);
+    strcat(dyn, p2);
+    
+    poststring(dyn);
+    
+    strcpy(packages, p4);
+    strcat(packages, p1);
+    strcat(packages, x->py_executable);
+    strcat(packages, p3);
+    
+    poststring(packages);
+    
+    strcpy(zip, x->home);
+    strcat(zip, p1);
+    strcat(zip, remove_white_spaces(replace_char(x->py_executable, '.', ' ')));
+    strcat(zip, ".zip");
+    
+    poststring(zip);
+    
+    strcpy(whole_path, ":");
+    strcat(whole_path, zip);
+    strcat(whole_path, ":");
+    strcat(whole_path, homeglobal);
+    strcat(whole_path, ":");
+    strcat(whole_path, dyn);
+    strcat(whole_path, ":");
+    strcat(whole_path, packages);
+    
+    char *p = whole_path;
+    x->py_path = p;
+     */
+}
+
+
+char* replace_char(char* str, char find, char replace){
+    char *current_pos = strchr(str,find);
+    while (current_pos) {
+        *current_pos = replace;
+        current_pos = strchr(current_pos,find);
+    }
+    return str;
+}
+
+
+char* mstrcat(int n, ...) {
+    va_list ap;
+    char *buf;
+    char whole[1024];
+    va_start(ap, n);
+    strcpy(whole, "");
+    
+    for (int j = 0; j < n; j++)
+        strcat(whole, va_arg(ap, char*));
+    
+    va_end(ap);
+    buf = whole;
+    return buf;
 }
